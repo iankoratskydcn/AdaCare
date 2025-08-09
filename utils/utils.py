@@ -7,6 +7,19 @@ import os
 import numpy as np
 import random
 
+import pandas as pd
+from tqdm import tqdm
+import pickle
+import numpy as np
+import os
+import yaml
+from sklearn.model_selection import StratifiedKFold, train_test_split
+
+
+RAW_DATA_PATH = '/home/jessica/Documents/MIMIC_IV'
+
+subject_ids = pd.read_csv('subjectidlist.csv')['subject_id'].astype(int).tolist()
+
 
 def preprocess_chunk(data, ts, discretizer, normalizer=None):
     data = [discretizer.transform(X, end=t)[0] for (X, t) in zip(data, ts)]
@@ -77,6 +90,200 @@ class BatchGen(object):
     def __next__(self):
         return self.next()
 
+class CrossValidationBatchGenDeepSupervision(object):
+
+    def __init__(self, dataloader, discretizer, normalizer,
+                 batch_size, return_names=False, validation_mode = 0, validation_step=0):
+        
+        # 0 is validate
+        # 1 is test
+        # 2 is train
+        self.validation_mode = validation_mode
+
+        # 0-9 for cross validation
+        self.validation_step = validation_step
+
+
+
+        self.batch_size = batch_size
+        self.return_names = return_names
+
+        self._load_per_patient_data(dataloader, discretizer, normalizer)
+
+        self._10_fold_cross_validation_split()
+            
+
+        self.steps = (len(self.data[1]) + batch_size - 1) // batch_size
+        self.lock = threading.Lock()
+        self.generator = self._generator()
+
+
+    #10 Fold Cross Validation
+    def _10_fold_cross_validation_split(self):
+        if not os.path.exists('../data/processed/mimic_iii_cv.pkl'):
+
+            # my approach to making this code as independant as feasible for the validation is to run it if
+            # the pickle isnt there, and if it is, read the pickle and return the data set
+            #
+            
+            # Add mortality label.
+            adm = pd.read_csv(os.path.join(RAW_DATA_PATH,'admissions.csv'), 
+                            usecols=['HADM_ID', 'HOSPITAL_EXPIRE_FLAG'])
+            
+            
+            # Get all ICU stays.
+            icu = pd.read_csv(os.path.join(RAW_DATA_PATH,'icustays.csv'))
+            oc = icu[['ts_id', 'HADM_ID', 'SUBJECT_ID']].merge(adm, on='HADM_ID', how='left')
+            oc = oc.rename(columns={'HOSPITAL_EXPIRE_FLAG': 'in_hospital_mortality'})
+
+            subject_labels = oc.drop_duplicates("SUBJECT_ID")[["SUBJECT_ID", "in_hospital_mortality"]]
+            subject_ids    = subject_labels["SUBJECT_ID"].values
+            labels         = subject_labels["in_hospital_mortality"].values
+
+            kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+            cv_splits = []
+
+            for fold, (temp_idx, test_idx) in enumerate(
+                    kf.split(subject_ids, labels), start=1):
+
+                seed      = fold
+                temp_subs = subject_ids[temp_idx]
+                test_subs = subject_ids[test_idx]
+                y_temp    = labels[temp_idx]
+
+                train_idx, val_idx = train_test_split(
+                    np.arange(len(temp_subs)),
+                    test_size=1/9,
+                    stratify=y_temp,
+                    random_state=seed
+                )
+
+                train_subs = temp_subs[train_idx]
+                val_subs   = temp_subs[val_idx]
+
+                train_ids = icu.loc[
+                    icu.SUBJECT_ID.isin(train_subs), 'STAY_ID'
+                ].tolist()
+                val_ids   = icu.loc[
+                    icu.SUBJECT_ID.isin(val_subs),   'STAY_ID'
+                ].tolist()
+                test_ids  = icu.loc[
+                    icu.SUBJECT_ID.isin(test_subs),  'STAY_ID'
+                ].tolist()
+
+                cv_splits.append({
+                    'seed':      seed,
+                    'train_ids': train_ids,
+                    'val_ids':   val_ids,
+                    'test_ids':  test_ids,
+                })
+                
+            #Save data.
+            os.makedirs('../data/processed', exist_ok=True)
+            with open('../data/processed/mimic_iii_cv.pkl', 'wb') as f:
+                pickle.dump([oc, cv_splits], f)
+        
+        # from here, we read that file and process all the data accordingly
+        # since we know that we need either the train/test/validation and we'll know the split we need
+        # we can just load the right one
+        with open('../data/processed/mimic_iii_cv.pkl', 'rb') as f:
+            oc, cv_splits = pickle.load(f)
+            
+            split = cv_splits[0]
+            for fold in cv_splits:
+                if fold['seed'] == self.validation_step:
+                    split = fold
+                    break
+            ids = split['train_ids']
+            if self.validation_mode == 0:
+                ids= split['val_ids']
+            if self.validation_mode == 1:
+                ids = split['test_ids']
+
+        # now we use the ids to export the right data
+
+
+    def _load_per_patient_data(self, dataloader, discretizer, normalizer):
+        timestep = discretizer._timestep
+
+        def get_bin(t):
+            eps = 1e-6
+            return int(t / timestep - eps)
+
+        N = len(dataloader._data["X"])
+        Xs = []
+        ts = []
+        masks = []
+        ys = []
+        names = []
+
+        for i in range(N):
+            X = dataloader._data["X"][i]
+            cur_ts = dataloader._data["ts"][i]
+            cur_ys = dataloader._data["ys"][i]
+            name = dataloader._data["name"][i]
+
+            cur_ys = [int(x) for x in cur_ys]
+
+            T = max(cur_ts)
+            nsteps = get_bin(T) + 1
+            mask = [0] * nsteps
+            y = [0] * nsteps
+
+            for pos, z in zip(cur_ts, cur_ys):
+                mask[get_bin(pos)] = 1
+                y[get_bin(pos)] = z
+
+            X = discretizer.transform(X, end=T)[0]
+            if normalizer is not None:
+                X = normalizer.transform(X)
+
+            Xs.append(X)
+            masks.append(np.array(mask))
+            ys.append(np.array(y))
+            names.append(name)
+            ts.append(cur_ts)
+
+            assert np.sum(mask) > 0
+            assert len(X) == len(mask) and len(X) == len(y)
+
+        self.data = [[Xs, masks], ys]
+        self.names = names
+        self.ts = ts
+
+    def _generator(self):
+        B = self.batch_size
+
+        # by this point, the pickle is made, and we've already read it as the data
+        # so from here the code is unchanged, simply send back the batches
+        while True:
+            for i in range(0, len(self.data[1]), B):
+                X = self.data[0][0][i:i + B]
+                mask = self.data[0][1][i:i + B]
+                y = self.data[1][i:i + B]
+                names = self.names[i:i + B]
+                ts = self.ts[i:i + B]
+
+                X = common_utils.pad_zeros(X)  # (B, T, D)
+                mask = common_utils.pad_zeros(mask)  # (B, T)
+                y = common_utils.pad_zeros(y)
+                y = np.expand_dims(y, axis=-1)  # (B, T, 1)
+                batch_data = ([X, mask], y)
+
+                if not self.return_names:
+                    yield batch_data
+                else:
+                    yield {"data": batch_data, "names": names, "ts": ts}
+
+    def __iter__(self):
+        return self.generator
+
+    def next(self):
+        with self.lock:
+            return next(self.generator)
+
+    def __next__(self):
+        return self.next()
 
 class BatchGenDeepSupervision(object):
 
