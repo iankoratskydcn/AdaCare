@@ -103,15 +103,15 @@ class CrossValidationBatchGenDeepSupervision(object):
         # 0-9 for cross validation
         self.validation_step = validation_step
 
-
+        self.ids = []
 
         self.batch_size = batch_size
         self.return_names = return_names
 
-        self._load_per_patient_data(dataloader, discretizer, normalizer)
-
+        # load the pickle
         self._10_fold_cross_validation_split()
-            
+        # then only export it to the list if the id is in the pickle
+        self._load_per_patient_data(dataloader, discretizer, normalizer)
 
         self.steps = (len(self.data[1]) + batch_size - 1) // batch_size
         self.lock = threading.Lock()
@@ -194,13 +194,13 @@ class CrossValidationBatchGenDeepSupervision(object):
                 if fold['seed'] == self.validation_step:
                     split = fold
                     break
-            ids = split['train_ids']
-            if self.validation_mode == 0:
-                ids= split['val_ids']
-            if self.validation_mode == 1:
-                ids = split['test_ids']
 
-        # now we use the ids to export the right data
+            if self.validation_mode == 0:
+                self.ids= split['val_ids']
+            if self.validation_mode == 1:
+                self.ids = split['test_ids']
+            if self.validation_mode == 2:
+                self.ids = split['train_ids']
 
 
     def _load_per_patient_data(self, dataloader, discretizer, normalizer):
@@ -222,6 +222,17 @@ class CrossValidationBatchGenDeepSupervision(object):
             cur_ts = dataloader._data["ts"][i]
             cur_ys = dataloader._data["ys"][i]
             name = dataloader._data["name"][i]
+
+            #####################################################
+            ##################### WARNING ! #####################
+            #####################################################
+
+            # THIS COULD AFFECT THE DATA, I'M NOT SURE, DOUBLE CHECK WITH JESSICA            
+
+            # i'm not sure where it will be, but for each one we need to check if the stay idis in the list
+            # if it's not in the ids list,then we don't want to output it here, else we do
+            if X[0] not in self.ids:
+                continue
 
             cur_ys = [int(x) for x in cur_ys]
 
