@@ -118,9 +118,13 @@ class CrossValidationBatchGenDeepSupervision(object):
         self.generator = self._generator()
 
 
+        self.pickle_dir = f'../data/processed/{self.validation_step}'
+        self.pickle_path = f'{pickle_dir}/mimic_iii_cv.pkl'
+
+
     #10 Fold Cross Validation
     def _10_fold_cross_validation_split(self):
-        if not os.path.exists('../data/processed/mimic_iii_cv.pkl'):
+        if not os.path.exists(self.pickle_path):
 
             # my approach to making this code as independant as feasible for the validation is to run it if
             # the pickle isnt there, and if it is, read the pickle and return the data set
@@ -179,14 +183,14 @@ class CrossValidationBatchGenDeepSupervision(object):
                 })
                 
             #Save data.
-            os.makedirs('../data/processed', exist_ok=True)
-            with open('../data/processed/mimic_iii_cv.pkl', 'wb') as f:
+            os.makedirs(self.pickle_dir, exist_ok=True)
+            with open(self.pickle_path, 'wb') as f:
                 pickle.dump([oc, cv_splits], f)
         
         # from here, we read that file and process all the data accordingly
         # since we know that we need either the train/test/validation and we'll know the split we need
         # we can just load the right one
-        with open('../data/processed/mimic_iii_cv.pkl', 'rb') as f:
+        with open(self.pickle_path, 'rb') as f:
             oc, cv_splits = pickle.load(f)
             
             split = cv_splits[0]
